@@ -1,6 +1,5 @@
 import 'dotenv/config';
 import { Client } from 'discord.js-selfbot-v13';
-import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
@@ -8,32 +7,39 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
 
-// ─── Validate environment ────────────────────────────────────────────────────
+// ─── Validate ────────────────────────────────────────────────────────────────
 if (!process.env.DISCORD_USER_TOKEN) {
   console.error('[FATAL] DISCORD_USER_TOKEN is not set. Exiting.');
   process.exit(1);
 }
 
 // ─── Config ───────────────────────────────────────────────────────────────────
-const TOKEN    = process.env.DISCORD_USER_TOKEN;
-const GUILD_ID = process.env.GUILD_ID   || '1272650515108593809';
-const CHAN_ID  = process.env.CHANNEL_ID || '1415535745174601838';
+const TOKEN = process.env.DISCORD_USER_TOKEN;
+
+// Bump bot
+const BUMP_GUILD_ID = process.env.GUILD_ID    || '1272650515108593809';
+const BUMP_CHAN_ID  = process.env.CHANNEL_ID  || '1415535745174601838';
+
+// VC bot
+const VC_GUILD_ID   = process.env.VC_GUILD_ID   || '505974446914535426';
+const VC_CHANNEL_ID = process.env.VC_CHANNEL_ID || '1122343326083993631';
+const OWNER_USER_ID = process.env.OWNER_USER_ID || '1271399565513195666';
 
 const BOTS = [
   {
     name       : 'DISBOARD',
     id         : '302050872383242240',
     command    : 'bump',
-    cooldownMs : 2  * 60 * 60 * 1000,  // 2 hours
-    jitterMs   : 15 * 60 * 1000,       // +0–15 min random
-    retryMs    : 30 * 60 * 1000,       // retry after 30 min on failure
+    cooldownMs : 2  * 60 * 60 * 1000,
+    jitterMs   : 15 * 60 * 1000,
+    retryMs    : 30 * 60 * 1000,
   },
   {
     name       : 'Discadia',
     id         : '1222548162741538938',
     command    : 'bump',
-    cooldownMs : 12 * 60 * 60 * 1000,  // 12 hours
-    jitterMs   : 20 * 60 * 1000,       // +0–20 min random
+    cooldownMs : 12 * 60 * 60 * 1000,
+    jitterMs   : 20 * 60 * 1000,
     retryMs    : 30 * 60 * 1000,
   },
 ];
@@ -44,9 +50,7 @@ const STATE_FILE = join(__dirname, 'data', 'state.json');
 function loadState() {
   try {
     mkdirSync(dirname(STATE_FILE), { recursive: true });
-    if (existsSync(STATE_FILE)) {
-      return JSON.parse(readFileSync(STATE_FILE, 'utf8'));
-    }
+    if (existsSync(STATE_FILE)) return JSON.parse(readFileSync(STATE_FILE, 'utf8'));
   } catch (e) {
     console.warn('[state] Could not load state, starting fresh:', e.message);
   }
@@ -74,7 +78,7 @@ function fmt(ms) {
   return `${s}s`;
 }
 
-// ─── Scheduler ────────────────────────────────────────────────────────────────
+// ─── Bump bot ─────────────────────────────────────────────────────────────────
 function scheduleBump(client, bot, state) {
   const now      = Date.now();
   const lastBump = state[bot.id] || 0;
@@ -90,8 +94,8 @@ function scheduleBump(client, bot, state) {
 }
 
 async function doBump(client, bot, state) {
-  const guild   = client.guilds.cache.get(GUILD_ID);
-  const channel = guild?.channels.cache.get(CHAN_ID);
+  const guild   = client.guilds.cache.get(BUMP_GUILD_ID);
+  const channel = guild?.channels.cache.get(BUMP_CHAN_ID);
 
   if (!guild || !channel) {
     console.error(`[${bot.name}] Guild/channel not found — retrying in ${fmt(bot.retryMs)}`);
@@ -117,23 +121,96 @@ async function doBump(client, bot, state) {
   setTimeout(() => doBump(client, bot, state), next);
 }
 
+// ─── VC bot ───────────────────────────────────────────────────────────────────
+let vcActive = false;
+
+function joinVC(client) {
+  const guild = client.guilds.cache.get(VC_GUILD_ID);
+  if (!guild) {
+    console.warn('[vc] Not in VC_GUILD_ID — make sure the account is in that server.');
+    return false;
+  }
+  guild.shard.send({
+    op: 4,
+    d: {
+      guild_id  : VC_GUILD_ID,
+      channel_id: VC_CHANNEL_ID,
+      self_mute : false,
+      self_deaf : false,
+    },
+  });
+  vcActive = true;
+  console.log(`[vc] ✅ Joined voice channel ${VC_CHANNEL_ID}`);
+  return true;
+}
+
+function leaveVC(client) {
+  const guild = client.guilds.cache.get(VC_GUILD_ID);
+  if (!guild) return false;
+  guild.shard.send({
+    op: 4,
+    d: {
+      guild_id  : VC_GUILD_ID,
+      channel_id: null,
+      self_mute : false,
+      self_deaf : false,
+    },
+  });
+  vcActive = false;
+  console.log('[vc] 👋 Left voice channel.');
+  return true;
+}
+
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 const client = new Client({ checkUpdate: false });
 const state  = loadState();
 
 client.on('ready', () => {
   console.log(`[bot] Logged in as ${client.user.tag}`);
-  console.log(`[bot] Guild: ${GUILD_ID} | Channel: ${CHAN_ID}`);
+  console.log(`[bot] Bump  → guild: ${BUMP_GUILD_ID} | channel: ${BUMP_CHAN_ID}`);
+  console.log(`[bot] VC    → guild: ${VC_GUILD_ID} | channel: ${VC_CHANNEL_ID}`);
+  console.log(`[bot] Owner → ${OWNER_USER_ID}`);
+
+  // Start bump scheduler
   for (const bot of BOTS) scheduleBump(client, bot, state);
-  console.log('[bot] ✅ Ready!');
+
+  console.log('[bot] ✅ Ready! (bump bot + vc bot running)');
+});
+
+// VC commands — %golive / %gooffline
+client.on('messageCreate', async (message) => {
+  if (message.author.id !== OWNER_USER_ID) return;
+
+  const cmd = message.content.trim().toLowerCase();
+
+  if (cmd === '%golive') {
+    if (vcActive) {
+      await message.reply('✅ Already live in the VC!').catch(() => {});
+      return;
+    }
+    const ok = joinVC(client);
+    if (ok) {
+      await message.reply('🎙️ Joined the voice channel! (mic on, speaker on)').catch(() => {});
+    } else {
+      await message.reply('⚠️ Could not join — make sure the account is in the target server.').catch(() => {});
+    }
+  }
+
+  if (cmd === '%gooffline') {
+    if (!vcActive) {
+      await message.reply('ℹ️ Not currently in a voice channel.').catch(() => {});
+      return;
+    }
+    leaveVC(client);
+    await message.reply('👋 Left the voice channel.').catch(() => {});
+  }
 });
 
 client.on('error', (err) => console.error('[client error]', err.message));
 
-// Keep process alive on Railway
+// Keep alive
 setInterval(() => {}, 1 << 30);
 
-// Never let one bot failure kill the whole process
 process.on('unhandledRejection', (r) => console.error('[unhandledRejection]', r));
 process.on('uncaughtException',  (e) => console.error('[uncaughtException]', e.message));
 

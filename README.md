@@ -1,61 +1,52 @@
 # discord-bump-bot
 
-Two separate bots in one repo — run them independently.
+One process, one Railway service — bump bot + VC bot running together.
 
-## Bots
+## What it does
 
-| File | Command | What it does |
-|---|---|---|
-| `index.js` | `node index.js` | Auto-bumps DISBOARD (2h) and Discadia (12h) |
-| `vc-bot.js` | `node vc-bot.js` | Sits in a voice channel, controlled by `%golive` / `%gooffline` |
-
-Both use the same `DISCORD_USER_TOKEN` from `.env`.
+- Auto-bumps DISBOARD every 2h and Discadia every 12h
+- `%golive` → joins your voice channel (mic on, speaker on)
+- `%gooffline` → leaves the voice channel
+- Only your user ID can trigger VC commands
 
 ## Setup
 
 ```bash
 npm install
 cp .env.example .env
-# Add your DISCORD_USER_TOKEN to .env
-```
-
-Run bump bot:
-```bash
+# Set DISCORD_USER_TOKEN in .env
 node index.js
 ```
 
-Run VC bot (separate terminal / separate process):
-```bash
-node vc-bot.js
-```
+## Deploy on Railway
 
-## VC bot commands
-
-Send from **any server** — only the hardcoded owner ID can trigger them:
-
-| Command | Action |
-|---|---|
-| `%golive` | Joins the voice channel (mic on, speaker on) |
-| `%gooffline` | Leaves the voice channel |
+1. **New Project** → **Deploy from GitHub** → pick this repo
+2. **Variables** → add everything from `.env.example` (fill in `DISCORD_USER_TOKEN`)
+3. Done — Railway runs `node index.js` automatically
 
 ## Environment variables
 
-| Variable | Used by | Description |
+| Variable | Description |
+|---|---|
+| `DISCORD_USER_TOKEN` | Your Discord account token (**required**) |
+| `GUILD_ID` | Bump bot server ID (default hardcoded) |
+| `CHANNEL_ID` | Bump bot channel ID (default hardcoded) |
+| `VC_GUILD_ID` | VC server ID (default hardcoded) |
+| `VC_CHANNEL_ID` | Voice channel ID (default hardcoded) |
+| `OWNER_USER_ID` | Your Discord user ID — only you control the VC (default hardcoded) |
+
+## VC commands
+
+Send from any server your account is in:
+
+| Command | Action |
+|---|---|
+| `%golive` | Joins the voice channel |
+| `%gooffline` | Leaves the voice channel |
+
+## Bump schedule
+
+| Bot | Cooldown | Jitter |
 |---|---|---|
-| `DISCORD_USER_TOKEN` | both | Your Discord account token |
-| `GUILD_ID` | bump bot | Server to bump in (default hardcoded) |
-| `CHANNEL_ID` | bump bot | Channel to send /bump in (default hardcoded) |
-| `VC_GUILD_ID` | vc bot | Server where bot sits in VC (default hardcoded) |
-| `VC_CHANNEL_ID` | vc bot | Voice channel to join (default hardcoded) |
-| `OWNER_USER_ID` | vc bot | Your user ID — only you can trigger VC commands (default hardcoded) |
-
-## Deploy on Railway (bump bot)
-
-```bash
-railway login && railway init && railway up
-railway variables set DISCORD_USER_TOKEN=your_token_here
-```
-
-## Deploy VC bot separately (second Railway service)
-
-Create a second Railway service pointing to the same repo, override the start command to `node vc-bot.js`.
+| DISBOARD | 2 hours | +0–15 min |
+| Discadia | 12 hours | +0–20 min |
