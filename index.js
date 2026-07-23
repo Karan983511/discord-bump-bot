@@ -25,6 +25,9 @@ const VC_GUILD_ID   = process.env.VC_GUILD_ID   || '505974446914535426';
 const VC_CHANNEL_ID = process.env.VC_CHANNEL_ID || '1122343326083993631';
 const OWNER_USER_ID = process.env.OWNER_USER_ID || '1271399565513195666';
 
+// How long to wait before auto-rejoining after an unexpected disconnect (ms)
+const VC_REJOIN_DELAY_MS = 10_000;
+
 const BOTS = [
   {
     name       : 'DISBOARD',
@@ -122,7 +125,14 @@ async function doBump(client, bot, state) {
 }
 
 // ─── VC bot ───────────────────────────────────────────────────────────────────
+
+/**
+ * vcActive   — true while the bot is physically in the VC (live gateway state)
+ * userWantsVC — true when the owner said %golive, false when they said %gooffline.
+ *               Persisted in state.json so restarts honour the owner's last intent.
+ */
 let vcActive = false;
+let rejoinTimer = null;           // handle so we never stack duplicate timers
 
 function joinVC(client) {
   const guild = client.guilds.cache.get(VC_GUILD_ID);
@@ -161,9 +171,33 @@ function leaveVC(client) {
   return true;
 }
 
+/**
+ * Schedule an auto-rejoin. Clears any previous pending timer first so only
+ * one rejoin attempt is ever queued at a time.
+ */
+function scheduleRejoin(client, state) {
+  if (rejoinTimer) clearTimeout(rejoinTimer);
+  console.log(`[vc] ⏳ Auto-rejoin scheduled in ${fmt(VC_REJOIN_DELAY_MS)}…`);
+  rejoinTimer = setTimeout(() => {
+    rejoinTimer = null;
+    // Double-check the owner still wants us online before actually joining
+    if (!state.userWantsVC) {
+      console.log('[vc] Auto-rejoin cancelled — owner went offline in the meantime.');
+      return;
+    }
+    console.log('[vc] 🔁 Attempting auto-rejoin…');
+    joinVC(client);
+  }, VC_REJOIN_DELAY_MS);
+}
+
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 const client = new Client({ checkUpdate: false });
 const state  = loadState();
+
+// Default userWantsVC to false if never set before
+if (state.userWantsVC === undefined) {
+  state.userWantsVC = false;
+}
 
 client.on('ready', () => {
   console.log(`[bot] Logged in as ${client.user.tag}`);
@@ -174,10 +208,39 @@ client.on('ready', () => {
   // Start bump scheduler
   for (const bot of BOTS) scheduleBump(client, bot, state);
 
+  // If the owner had the bot online before a restart/crash, rejoin automatically
+  if (state.userWantsVC) {
+    console.log('[vc] 🔄 Restoring VC presence from saved state…');
+    joinVC(client);
+  }
+
   console.log('[bot] ✅ Ready! (bump bot + vc bot running)');
 });
 
-// VC commands — %golive / %gooffline
+// ─── VC guard — detect unexpected disconnects ─────────────────────────────────
+client.on('voiceStateUpdate', (oldState, newState) => {
+  // Only care about our own account
+  if (oldState.member?.id !== client.user?.id) return;
+
+  const wasInOurChannel = oldState.channelId === VC_CHANNEL_ID && oldState.guild?.id === VC_GUILD_ID;
+  const isNowDisconnected = !newState.channelId;
+
+  if (wasInOurChannel && isNowDisconnected) {
+    vcActive = false;
+
+    if (!state.userWantsVC) {
+      // Owner commanded %gooffline — this is expected, do nothing
+      console.log('[vc] Left VC (owner-commanded). Standing by.');
+      return;
+    }
+
+    // Unexpected disconnect — owner never said %gooffline
+    console.warn('[vc] ⚠️  Unexpectedly left VC without %gooffline command! Scheduling auto-rejoin…');
+    scheduleRejoin(client, state);
+  }
+});
+
+// ─── Owner commands — %golive / %gooffline ────────────────────────────────────
 client.on('messageCreate', async (message) => {
   if (message.author.id !== OWNER_USER_ID) return;
 
@@ -188,6 +251,12 @@ client.on('messageCreate', async (message) => {
       await message.reply('✅ Already live in the VC!').catch(() => {});
       return;
     }
+    // Cancel any pending rejoin timer — we're about to join right now
+    if (rejoinTimer) { clearTimeout(rejoinTimer); rejoinTimer = null; }
+
+    state.userWantsVC = true;
+    saveState(state);
+
     const ok = joinVC(client);
     if (ok) {
       await message.reply('🎙️ Joined the voice channel! (mic on, speaker on)').catch(() => {});
@@ -197,6 +266,12 @@ client.on('messageCreate', async (message) => {
   }
 
   if (cmd === '%gooffline') {
+    // Cancel any pending auto-rejoin first
+    if (rejoinTimer) { clearTimeout(rejoinTimer); rejoinTimer = null; }
+
+    state.userWantsVC = false;
+    saveState(state);
+
     if (!vcActive) {
       await message.reply('ℹ️ Not currently in a voice channel.').catch(() => {});
       return;
