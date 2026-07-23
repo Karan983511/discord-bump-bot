@@ -25,8 +25,15 @@ const VC_GUILD_ID   = process.env.VC_GUILD_ID   || '505974446914535426';
 const VC_CHANNEL_ID = process.env.VC_CHANNEL_ID || '1122343326083993631';
 const OWNER_USER_ID = process.env.OWNER_USER_ID || '1271399565513195666';
 
+// Set VC_AUTO_JOIN=true in Railway env vars to make the bot always join VC on start.
+// This survives container restarts without needing a database or persistent file.
+const VC_AUTO_JOIN = process.env.VC_AUTO_JOIN === 'true';
+
 // How long to wait before auto-rejoining after an unexpected disconnect (ms)
 const VC_REJOIN_DELAY_MS = 10_000;
+
+// How often to check we're still in the VC (ms) — catches silent drops
+const VC_HEARTBEAT_MS = 2 * 60 * 1000; // every 2 minutes
 
 const BOTS = [
   {
@@ -127,12 +134,19 @@ async function doBump(client, bot, state) {
 // ─── VC bot ───────────────────────────────────────────────────────────────────
 
 /**
- * vcActive   — true while the bot is physically in the VC (live gateway state)
- * userWantsVC — true when the owner said %golive, false when they said %gooffline.
- *               Persisted in state.json so restarts honour the owner's last intent.
+ * userWantsVC — the owner's intent.
+ *   - Starts as VC_AUTO_JOIN (env var) so Railway restarts always restore VC.
+ *   - Flips to true on %golive, false on %gooffline.
+ *   - Also saved to state.json as a secondary fallback if VC_AUTO_JOIN is not set.
  */
-let vcActive = false;
-let rejoinTimer = null;           // handle so we never stack duplicate timers
+let vcActive    = false;
+let rejoinTimer = null;
+
+function wantsVC(state) {
+  // Env var takes priority (survives container restarts without a DB)
+  if (VC_AUTO_JOIN) return true;
+  return !!state.userWantsVC;
+}
 
 function joinVC(client) {
   const guild = client.guilds.cache.get(VC_GUILD_ID);
@@ -172,70 +186,94 @@ function leaveVC(client) {
 }
 
 /**
- * Schedule an auto-rejoin. Clears any previous pending timer first so only
- * one rejoin attempt is ever queued at a time.
+ * Schedule a single auto-rejoin attempt. Clears any existing timer first.
  */
 function scheduleRejoin(client, state) {
   if (rejoinTimer) clearTimeout(rejoinTimer);
-  console.log(`[vc] ⏳ Auto-rejoin scheduled in ${fmt(VC_REJOIN_DELAY_MS)}…`);
+  console.log(`[vc] ⏳ Auto-rejoin in ${fmt(VC_REJOIN_DELAY_MS)}…`);
   rejoinTimer = setTimeout(() => {
     rejoinTimer = null;
-    // Double-check the owner still wants us online before actually joining
-    if (!state.userWantsVC) {
-      console.log('[vc] Auto-rejoin cancelled — owner went offline in the meantime.');
+    if (!wantsVC(state)) {
+      console.log('[vc] Auto-rejoin cancelled — owner is offline.');
       return;
     }
-    console.log('[vc] 🔁 Attempting auto-rejoin…');
+    console.log('[vc] 🔁 Auto-rejoining…');
     joinVC(client);
   }, VC_REJOIN_DELAY_MS);
+}
+
+/**
+ * Heartbeat: every VC_HEARTBEAT_MS check that the bot is actually in the VC.
+ * Catches silent drops that don't fire voiceStateUpdate (e.g. WebSocket reconnects).
+ */
+function startHeartbeat(client, state) {
+  setInterval(() => {
+    if (!wantsVC(state)) return; // owner is offline, nothing to do
+
+    const guild  = client.guilds.cache.get(VC_GUILD_ID);
+    const member = guild?.members?.me ?? guild?.members?.cache?.get(client.user.id);
+    const inVC   = member?.voice?.channelId === VC_CHANNEL_ID;
+
+    if (!inVC && !rejoinTimer) {
+      console.warn('[vc] ⚠️ Heartbeat: not in VC — triggering rejoin.');
+      vcActive = false;
+      scheduleRejoin(client, state);
+    }
+  }, VC_HEARTBEAT_MS);
 }
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 const client = new Client({ checkUpdate: false });
 const state  = loadState();
 
-// Default userWantsVC to false if never set before
-if (state.userWantsVC === undefined) {
-  state.userWantsVC = false;
-}
-
 client.on('ready', () => {
   console.log(`[bot] Logged in as ${client.user.tag}`);
-  console.log(`[bot] Bump  → guild: ${BUMP_GUILD_ID} | channel: ${BUMP_CHAN_ID}`);
-  console.log(`[bot] VC    → guild: ${VC_GUILD_ID} | channel: ${VC_CHANNEL_ID}`);
-  console.log(`[bot] Owner → ${OWNER_USER_ID}`);
+  console.log(`[bot] Bump      → guild: ${BUMP_GUILD_ID} | channel: ${BUMP_CHAN_ID}`);
+  console.log(`[bot] VC        → guild: ${VC_GUILD_ID} | channel: ${VC_CHANNEL_ID}`);
+  console.log(`[bot] Owner     → ${OWNER_USER_ID}`);
+  console.log(`[bot] VC_AUTO_JOIN = ${VC_AUTO_JOIN}`);
 
   // Start bump scheduler
   for (const bot of BOTS) scheduleBump(client, bot, state);
 
-  // If the owner had the bot online before a restart/crash, rejoin automatically
-  if (state.userWantsVC) {
-    console.log('[vc] 🔄 Restoring VC presence from saved state…');
+  // Auto-join VC if desired
+  if (wantsVC(state)) {
+    console.log('[vc] 🔄 Auto-joining VC on startup…');
     joinVC(client);
   }
 
-  console.log('[bot] ✅ Ready! (bump bot + vc bot running)');
+  // Start heartbeat to catch silent drops
+  startHeartbeat(client, state);
+
+  console.log('[bot] ✅ Ready!');
+});
+
+// ─── Reconnect guard ──────────────────────────────────────────────────────────
+// After a WebSocket resume or reconnect, Discord resets voice state.
+// Re-send the join opcode so the bot ends up back in the channel.
+client.on('shardResumed', () => {
+  console.log('[bot] 🔌 Shard resumed.');
+  if (wantsVC(state)) {
+    console.log('[vc] Re-joining VC after shard resume…');
+    setTimeout(() => joinVC(client), 3000); // brief delay for guild cache to settle
+  }
 });
 
 // ─── VC guard — detect unexpected disconnects ─────────────────────────────────
 client.on('voiceStateUpdate', (oldState, newState) => {
-  // Only care about our own account
   if (oldState.member?.id !== client.user?.id) return;
 
-  const wasInOurChannel = oldState.channelId === VC_CHANNEL_ID && oldState.guild?.id === VC_GUILD_ID;
+  const wasInOurChannel  = oldState.channelId === VC_CHANNEL_ID
+                        && oldState.guild?.id  === VC_GUILD_ID;
   const isNowDisconnected = !newState.channelId;
 
   if (wasInOurChannel && isNowDisconnected) {
     vcActive = false;
-
-    if (!state.userWantsVC) {
-      // Owner commanded %gooffline — this is expected, do nothing
+    if (!wantsVC(state)) {
       console.log('[vc] Left VC (owner-commanded). Standing by.');
       return;
     }
-
-    // Unexpected disconnect — owner never said %gooffline
-    console.warn('[vc] ⚠️  Unexpectedly left VC without %gooffline command! Scheduling auto-rejoin…');
+    console.warn('[vc] ⚠️ Unexpectedly left VC — scheduling auto-rejoin.');
     scheduleRejoin(client, state);
   }
 });
@@ -251,7 +289,6 @@ client.on('messageCreate', async (message) => {
       await message.reply('✅ Already live in the VC!').catch(() => {});
       return;
     }
-    // Cancel any pending rejoin timer — we're about to join right now
     if (rejoinTimer) { clearTimeout(rejoinTimer); rejoinTimer = null; }
 
     state.userWantsVC = true;
@@ -259,14 +296,13 @@ client.on('messageCreate', async (message) => {
 
     const ok = joinVC(client);
     if (ok) {
-      await message.reply('🎙️ Joined the voice channel! (mic on, speaker on)').catch(() => {});
+      await message.reply('🎙️ Joined the voice channel!').catch(() => {});
     } else {
       await message.reply('⚠️ Could not join — make sure the account is in the target server.').catch(() => {});
     }
   }
 
   if (cmd === '%gooffline') {
-    // Cancel any pending auto-rejoin first
     if (rejoinTimer) { clearTimeout(rejoinTimer); rejoinTimer = null; }
 
     state.userWantsVC = false;
@@ -278,6 +314,16 @@ client.on('messageCreate', async (message) => {
     }
     leaveVC(client);
     await message.reply('👋 Left the voice channel.').catch(() => {});
+  }
+
+  // Debug: check current VC status
+  if (cmd === '%vcstatus') {
+    const guild  = client.guilds.cache.get(VC_GUILD_ID);
+    const member = guild?.members?.me ?? guild?.members?.cache?.get(client.user.id);
+    const chan   = member?.voice?.channelId ?? 'none';
+    await message.reply(
+      `vcActive=${vcActive} | userWantsVC=${state.userWantsVC} | VC_AUTO_JOIN=${VC_AUTO_JOIN} | actualChannel=${chan}`
+    ).catch(() => {});
   }
 });
 
