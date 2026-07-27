@@ -7,13 +7,13 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
 
-// ─── Validate ────────────────────────────────────────────────────────────────
+// ─── Validate ──────────────────────────────────────────────────────────[...]
 if (!process.env.DISCORD_USER_TOKEN) {
   console.error('[FATAL] DISCORD_USER_TOKEN is not set. Exiting.');
   process.exit(1);
 }
 
-// ─── Config ───────────────────────────────────────────────────────────────────
+// ─── Config ────────────────────────────────────────────────────────────[...]
 const TOKEN = process.env.DISCORD_USER_TOKEN;
 
 // Bump bot
@@ -27,6 +27,9 @@ const OWNER_USER_ID = process.env.OWNER_USER_ID || '1271399565513195666';
 
 // How long to wait before auto-rejoining after an unexpected disconnect (ms)
 const VC_REJOIN_DELAY_MS = 10_000;
+
+// IMPORTANT: Time to wait after bot is ready before joining VC (Discord needs time to sync)
+const VC_JOIN_DELAY_MS = 3_000;
 
 const BOTS = [
   {
@@ -47,7 +50,7 @@ const BOTS = [
   },
 ];
 
-// ─── State persistence ────────────────────────────────────────────────────────
+// ─── State persistence ───────────────────────────────────────────────────────[...]
 const STATE_FILE = join(__dirname, 'data', 'state.json');
 
 function loadState() {
@@ -69,7 +72,7 @@ function saveState(state) {
   }
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────–[...]
 const rand = (max) => Math.floor(Math.random() * max);
 
 function fmt(ms) {
@@ -81,7 +84,7 @@ function fmt(ms) {
   return `${s}s`;
 }
 
-// ─── Bump bot ─────────────────────────────────────────────────────────────────
+// ─── Bump bot ──────────────────────────────────────────────────────────[...]
 function scheduleBump(client, bot, state) {
   const now      = Date.now();
   const lastBump = state[bot.id] || 0;
@@ -124,7 +127,7 @@ async function doBump(client, bot, state) {
   setTimeout(() => doBump(client, bot, state), next);
 }
 
-// ─── VC bot ───────────────────────────────────────────────────────────────────
+// ─── VC bot ──────────────────────────────────────────────────────────–[...]
 
 /**
  * vcActive   — true while the bot is physically in the VC (live gateway state)
@@ -190,7 +193,7 @@ function scheduleRejoin(client, state) {
   }, VC_REJOIN_DELAY_MS);
 }
 
-// ─── Boot ─────────────────────────────────────────────────────────────────────
+// ─── Boot ───────────────────────────────────────────────────────────[...]
 const client = new Client({ checkUpdate: false });
 const state  = loadState();
 
@@ -209,9 +212,13 @@ client.on('ready', () => {
   for (const bot of BOTS) scheduleBump(client, bot, state);
 
   // If the owner had the bot online before a restart/crash, rejoin automatically
+  // BUT WAIT a bit so Discord can fully sync the connection
   if (state.userWantsVC) {
-    console.log('[vc] 🔄 Restoring VC presence from saved state…');
-    joinVC(client);
+    console.log(`[vc] 🔄 Restoring VC presence from saved state in ${fmt(VC_JOIN_DELAY_MS)}…`);
+    setTimeout(() => {
+      console.log('[vc] 🔄 Now joining voice channel…');
+      joinVC(client);
+    }, VC_JOIN_DELAY_MS);
   }
 
   console.log('[bot] ✅ Ready! (bump bot + vc bot running)');
