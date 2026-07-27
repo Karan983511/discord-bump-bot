@@ -1,6 +1,6 @@
 import mongoose from 'mongoose';
 
-// ─── State Schema ──────────────────────────────────────────────────────────
+// ─── State Schema ─────────────────────────────────────────────────────────[...]
 const stateSchema = new mongoose.Schema({
   _id: { type: String, default: 'singleton' }, // Always use same document
   userWantsVC: { type: Boolean, default: false },
@@ -50,7 +50,8 @@ export class MongoStateManager {
         console.warn('[mongodb] Not connected, returning empty state');
         return {
           userWantsVC: false,
-      };
+          bumpTimestamps: {},
+        };
       }
 
       let doc = await StateModel.findById('singleton');
@@ -80,7 +81,7 @@ export class MongoStateManager {
       return state;
     } catch (err) {
       console.error('[mongodb] Error loading state:', err.message);
-      return { userWantsVC: false };
+      return { userWantsVC: false, bumpTimestamps: {} };
     }
   }
 
